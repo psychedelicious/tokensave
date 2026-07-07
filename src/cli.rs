@@ -92,11 +92,9 @@ pub enum Commands {
         /// Agent to configure (auto-detects if omitted)
         #[arg(long, value_parser = agent_value_parser())]
         agent: Option<String>,
-        /// Whether to install a global git `post-commit` hook that runs
-        /// `tokensave sync` after each commit. `default` preserves the
-        /// interactive prompt (or silent skip on non-TTY). `yes` installs
-        /// the hook without asking; `no` skips it without asking.
-        #[arg(long, value_enum, default_value_t = GitHookMode::Default)]
+        /// Whether to install global git hooks. Defaults to `no`; pass `yes`
+        /// to explicitly opt in to hook-based background automation.
+        #[arg(long, value_enum, default_value_t = GitHookMode::No)]
         git_hook: GitHookMode,
         /// Install into the current project's config instead of the user's
         /// global config. Only supported for agents with a project-scoped

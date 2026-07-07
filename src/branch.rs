@@ -182,6 +182,50 @@ pub fn find_nearest_tracked_ancestor(
     best.map(|(name, _)| name)
 }
 
+/// Tracks `branch` by copying the nearest tracked ancestor DB into a per-branch
+/// DB and recording it in `BranchMeta`.
+///
+/// This is intentionally a copy-only operation. Callers that need a fresh
+/// graph should open the copied branch DB and run the normal incremental sync
+/// path afterwards.
+pub fn track_branch_copy(
+    project_root: &Path,
+    tokensave_dir: &Path,
+    branch: &str,
+) -> crate::errors::Result<bool> {
+    use crate::branch_meta;
+
+    let Some(mut meta) = branch_meta::load_branch_meta(tokensave_dir) else {
+        return Ok(false);
+    };
+
+    if branch == meta.default_branch || meta.is_tracked(branch) {
+        return Ok(false);
+    }
+
+    let parent = find_nearest_tracked_ancestor(project_root, branch, &meta)
+        .unwrap_or_else(|| meta.default_branch.clone());
+    let Some(parent_db) = resolve_branch_db_path(tokensave_dir, &parent, &meta) else {
+        return Ok(false);
+    };
+    if !parent_db.exists() {
+        return Ok(false);
+    }
+
+    let sanitized = sanitize_branch_name(branch);
+    if sanitized.is_empty() {
+        return Ok(false);
+    }
+    let branches_dir = branch_meta::ensure_branches_dir(tokensave_dir)?;
+    let new_db_path = branches_dir.join(format!("{sanitized}.db"));
+    std::fs::copy(&parent_db, &new_db_path)?;
+
+    let db_file = format!("branches/{sanitized}.db");
+    meta.add_branch(branch, &db_file, &parent);
+    branch_meta::save_branch_meta(tokensave_dir, &meta)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -208,5 +252,25 @@ mod tests {
         assert_eq!(sanitize_branch_name(".."), "");
         // dots and slashes become underscores, collapsed
         assert_eq!(sanitize_branch_name("foo/../bar"), "foo_bar");
+    }
+
+    #[test]
+    fn track_branch_copy_copies_ancestor_and_is_idempotent() {
+        use crate::branch_meta;
+        let dir = tempfile::TempDir::new().unwrap();
+        let ts = dir.path();
+        branch_meta::save_branch_meta(ts, &branch_meta::BranchMeta::new("main")).unwrap();
+        std::fs::write(ts.join("tokensave.db"), b"DBDATA").unwrap();
+
+        assert!(track_branch_copy(ts, ts, "feature-x").unwrap());
+        assert!(ts.join("branches").join("feature-x.db").exists());
+        assert!(branch_meta::load_branch_meta(ts)
+            .unwrap()
+            .is_tracked("feature-x"));
+
+        assert!(!track_branch_copy(ts, ts, "feature-x").unwrap());
+        assert!(!track_branch_copy(ts, ts, "main").unwrap());
+        let empty = tempfile::TempDir::new().unwrap();
+        assert!(!track_branch_copy(empty.path(), empty.path(), "x").unwrap());
     }
 }

@@ -1,17 +1,28 @@
 use std::path::Path;
 use tokensave::tokensave::TokenSave;
 
-/// Opens an existing project, or tells the user to run `tokensave init` first.
+/// Opens a project index, creating it first if needed, then catches up any
+/// stale files before returning it.
 pub async fn ensure_initialized(project_path: &Path) -> tokensave::errors::Result<TokenSave> {
-    if TokenSave::is_initialized(project_path) {
-        return TokenSave::open(project_path).await;
-    }
-    Err(tokensave::errors::TokenSaveError::Config {
-        message: format!(
-            "no TokenSave index found at '{}' — run 'tokensave init' first",
+    let cg = if TokenSave::is_initialized(project_path) {
+        TokenSave::open(project_path).await?
+    } else {
+        eprintln!(
+            "[tokensave] no index found at '{}' — initializing",
             project_path.display()
-        ),
-    })
+        );
+        let cg = TokenSave::init(project_path).await?;
+        cg.index_all().await?;
+        crate::global::update_global_db(&cg).await;
+        cg
+    };
+
+    let stale = cg.find_stale_files().await;
+    if !stale.is_empty() {
+        cg.sync_if_stale_silent(&stale).await?;
+        crate::global::update_global_db(&cg).await;
+    }
+    Ok(cg)
 }
 
 /// Fallback for `serve`: when CWD-based discovery fails, check the global DB

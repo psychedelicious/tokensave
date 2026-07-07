@@ -192,6 +192,16 @@ impl TokenSave {
         let tokensave_dir = get_tokensave_dir(project_root);
         let active_branch = branch::current_branch(project_root);
 
+        if let Some(branch) = active_branch.as_deref() {
+            match branch::track_branch_copy(project_root, &tokensave_dir, branch) {
+                Ok(true) => eprintln!(
+                    "[tokensave] tracked branch '{branch}' by copying the nearest ancestor index"
+                ),
+                Ok(false) => {}
+                Err(e) => eprintln!("[tokensave] could not auto-track branch '{branch}': {e}"),
+            }
+        }
+
         let (db_path, serving_branch, fallback_warning) =
             Self::resolve_db_for_branch(project_root, &tokensave_dir, active_branch.as_deref());
 

@@ -429,47 +429,18 @@ struct ListRow {
     tokens: u64,
 }
 
-/// True when the global DB has zero registered projects (or can't be opened
-/// at all) — i.e. the user has not run `tokensave init` anywhere yet.
-async fn is_fresh_install() -> bool {
-    match tokensave::global_db::GlobalDb::open().await {
-        Some(gdb) => gdb.list_project_paths().await.is_empty(),
-        None => true,
-    }
-}
-
-/// When invoked with no subcommand, offer to create the index if none exists.
+/// When invoked with no subcommand, ensure an index exists, then show help.
 pub(crate) async fn handle_no_command() -> tokensave::errors::Result<()> {
     let project_path = tokensave::config::resolve_path(None);
-    if TokenSave::is_initialized(&project_path) {
-        // Already initialized — show help via clap
-        let _ = <crate::cli::Cli as clap::CommandFactory>::command().print_help();
-        eprintln!();
-        return Ok(());
-    }
-    if is_fresh_install().await {
-        eprintln!("\x1b[1;36mWelcome to tokensave!\x1b[0m");
+    if !TokenSave::is_initialized(&project_path) {
         eprintln!(
-            "Looks like a new installation. To get started, run \x1b[1mtokensave init\x1b[0m \
-             in your project root."
+            "No TokenSave index found at '{}'; initializing.",
+            project_path.display()
         );
-        eprintln!();
+        auto_init_and_index(&project_path, &[], false).await?;
     }
-    eprint!(
-        "No TokenSave index found at '{}'. Create one now? [Y/n] ",
-        project_path.display()
-    );
-    io::stderr().flush().ok();
-    let mut answer = String::new();
-    io::stdin().lock().read_line(&mut answer).map_err(|e| {
-        tokensave::errors::TokenSaveError::Config {
-            message: format!("failed to read stdin: {}", e),
-        }
-    })?;
-    let answer = answer.trim();
-    if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-        init_and_index(&project_path, &[], false).await?;
-    }
+    let _ = <crate::cli::Cli as clap::CommandFactory>::command().print_help();
+    eprintln!();
     Ok(())
 }
 
@@ -478,6 +449,24 @@ pub(crate) async fn init_and_index(
     project_path: &Path,
     skip_folders: &[String],
     verbose: bool,
+) -> tokensave::errors::Result<TokenSave> {
+    init_and_index_with_options(project_path, skip_folders, verbose, true).await
+}
+
+/// Initializes a new project without prompting to edit ancillary project files.
+pub(crate) async fn auto_init_and_index(
+    project_path: &Path,
+    skip_folders: &[String],
+    verbose: bool,
+) -> tokensave::errors::Result<TokenSave> {
+    init_and_index_with_options(project_path, skip_folders, verbose, false).await
+}
+
+async fn init_and_index_with_options(
+    project_path: &Path,
+    skip_folders: &[String],
+    verbose: bool,
+    prompt_gitignore: bool,
 ) -> tokensave::errors::Result<TokenSave> {
     debug_assert!(
         project_path.is_dir(),
@@ -493,7 +482,7 @@ pub(crate) async fn init_and_index(
         let cg = TokenSave::init(project_path).await?;
         eprintln!("Initialized TokenSave at {}", project_path.display());
         // Offer to add .tokensave to .gitignore if not already there
-        if !tokensave::config::is_in_gitignore(project_path) {
+        if prompt_gitignore && !tokensave::config::is_in_gitignore(project_path) {
             eprint!("Add .tokensave to .gitignore? [Y/n] ");
             io::stderr().flush().ok();
             let mut answer = String::new();

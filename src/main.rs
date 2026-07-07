@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 // Updated 2026-03-23: compact bordered table for status output
 use clap::Parser;
-use std::io::{self, BufRead, Write};
+use std::io::Write;
 use std::process;
 
 use tokensave::tokensave::TokenSave;
@@ -154,7 +154,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
     // and beta users now stay on beta until they explicitly switch off.
 
     // Best-effort check: warn if install needs re-running.
-    if !skip_agent_install_maintenance {
+    if should_run_automatic_agent_config_maintenance(&command) {
         tokensave::agents::claude::check_install_stale();
     }
 
@@ -168,7 +168,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
     //       we just advance `previous_version` and skip reinstall.
     //   (b) Fallback for external upgrades (`brew upgrade`, `cargo install`):
     //       the running version is newer than `last_installed_version`.
-    if !skip_agent_install_maintenance {
+    if should_run_automatic_agent_config_maintenance(&command) {
         let running = env!("CARGO_PKG_VERSION");
         let previous_version = if user_config.previous_version.is_empty() {
             "6.0.0".to_string()
@@ -264,14 +264,6 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             verbose,
         } => {
             let project_path = tokensave::config::resolve_path_with_discovery(path);
-            if !TokenSave::is_initialized(&project_path) {
-                eprintln!(
-                    "\x1b[31merror:\x1b[0m no TokenSave index found at '{}'.\n\
-                     Run \x1b[1mtokensave init\x1b[0m to create one first.",
-                    project_path.display()
-                );
-                std::process::exit(1);
-            }
             // Warn if legacy .codegraph directory exists
             if project_path.join(".codegraph").is_dir() {
                 eprintln!(
@@ -283,7 +275,9 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             // Check for updates in parallel with indexing
             let version_handle = std::thread::spawn(tokensave::cloud::fetch_latest_version);
 
-            if force {
+            if !TokenSave::is_initialized(&project_path) {
+                commands::auto_init_and_index(&project_path, &skip_folders, verbose).await?;
+            } else if force {
                 commands::init_and_index(&project_path, &skip_folders, verbose).await?;
             } else {
                 let mut cg = TokenSave::open(&project_path).await?;
@@ -378,27 +372,7 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
             runtime,
         } => {
             let project_path = tokensave::config::resolve_path_with_discovery(path);
-            let cg = if TokenSave::is_initialized(&project_path) {
-                TokenSave::open(&project_path).await?
-            } else {
-                eprint!(
-                    "No TokenSave index found at '{}'. Create one now? [Y/n] ",
-                    project_path.display()
-                );
-                io::stderr().flush().ok();
-                let mut answer = String::new();
-                io::stdin().lock().read_line(&mut answer).map_err(|e| {
-                    tokensave::errors::TokenSaveError::Config {
-                        message: format!("failed to read stdin: {e}"),
-                    }
-                })?;
-                let answer = answer.trim();
-                if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-                    commands::init_and_index(&project_path, &[], false).await?
-                } else {
-                    return Ok(());
-                }
-            };
+            let cg = serve::ensure_initialized(&project_path).await?;
             if runtime {
                 let snap = tokensave::runtime_telemetry::collect(&cg).await?;
                 if json {
@@ -666,7 +640,9 @@ async fn run(cli: Cli) -> tokensave::errors::Result<()> {
                 user_cfg.save();
             }
 
-            tokensave::agents::offer_git_post_commit_hook(&tokensave_bin, git_hook);
+            if git_hook == tokensave::agents::GitHookMode::Yes {
+                tokensave::agents::offer_git_post_commit_hook(&tokensave_bin, git_hook);
+            }
         }
         Commands::Reinstall => {
             let home = tokensave::agents::home_dir().ok_or_else(|| {
@@ -1178,6 +1154,10 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
     )
 }
 
+fn should_run_automatic_agent_config_maintenance(_command: &Commands) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod startup_tests {
     use super::{should_skip_agent_install_maintenance, Commands};
@@ -1194,7 +1174,7 @@ mod startup_tests {
     fn explicit_agent_config_commands_skip_agent_install_maintenance() {
         assert!(should_skip_agent_install_maintenance(&Commands::Install {
             agent: Some("kiro".to_string()),
-            git_hook: tokensave::agents::GitHookMode::Default,
+            git_hook: tokensave::agents::GitHookMode::No,
             local: false,
         }));
         assert!(should_skip_agent_install_maintenance(&Commands::Reinstall));
